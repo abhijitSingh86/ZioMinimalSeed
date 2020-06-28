@@ -33,7 +33,10 @@ object CircuitBreaker {
     def setToOpenState(endInstant: Instant): CircuitState =
       this.copy(status = Some(CircuitBreakerOpened), openStateEndTime = Some(endInstant), halfOpenRequestCount = 0)
 
-    def incrementFail(): CircuitState = this.copy(continuesFailedCount = this.continuesFailedCount + 1)
+    def incrementFail(currentInstant: Instant, maxFailCount: Int, remainOpen: Duration): CircuitState = {
+      this.copy(continuesFailedCount = this.continuesFailedCount + 1)
+        .updateOpenState(currentInstant,maxFailCount,remainOpen)
+    }
     def updateOpenState(currentInstant: Instant, maxFailCount: Int, remainOpen: Duration): CircuitState =
       if(this.halfOpenRequestCount > 0){
         this.copy(halfOpenRequestCount = this.halfOpenRequestCount+1)
@@ -85,13 +88,19 @@ object CircuitBreaker {
                     case state if state.status.isDefined || state.halfOpenRequestCount > 1 => ZIO.fail(Left(CircuitBreakerOpened))
 
                     case state if state.status.isEmpty && state.halfOpenRequestCount == 0 =>
-                      call(r)(s).either.flatMap {
-                        case err @ Left(e) if e == ConnectionError => ref.update(_.incrementFail()).map(_ => err)
-                        case err @ Left(_)                         => ZIO.succeed(err)
-                        case response                              => ref.update(_.resetState()).map(_ => response)
-                      }.absolve.mapError(Right(_))
+                      val ee: URIO[Any, Either[Either[Nothing, HttpClientError], Response]] = call(r)(s).mapError(Right(_)).either
 
+                      def isConnectionError(e:Either[Nothing,HttpClientError]):Boolean = e.map(_ == ConnectionError).getOrElse(false)
 
+                      ee.flatMap {
+                        case _ @ Left(e) if isConnectionError(e) =>
+                          ref.updateAndGet(_.incrementFail(cdt.toInstant, maxFailures, remainOpened)).map(_.status match{
+                          case Some(_) => Left(Left(CircuitBreakerOpened))
+                          case _ => Left(e)
+                        })
+                        case _ @ Left(e)                         => ZIO.succeed(Left(e))
+                        case response @ Right(_)                 => ref.update(_.resetState()).map(_ => response)
+                      }.absolve
                   })
               }
             }
