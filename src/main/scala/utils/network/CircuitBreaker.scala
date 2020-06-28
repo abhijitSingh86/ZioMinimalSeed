@@ -98,7 +98,7 @@ object CircuitBreaker {
                           case Some(_) => Left(Left(CircuitBreakerOpened))
                           case _ => Left(e)
                         })
-                        case _ @ Left(e)                         => ZIO.succeed(Left(e))
+                        case _ @ Left(e)                         => ref.update(_.resetState()).map(_ =>Left(e))
                         case response @ Right(_)                 => ref.update(_.resetState()).map(_ => response)
                       }.absolve
                   })

@@ -1,11 +1,11 @@
 package utils.network
 
 import utils.network.CircuitBreaker.CircuitBreakerOpened
-import utils.network.Domain.{ ConnectionError, Request, Response, Server, SuccessResponse }
-import zio.{ IO, Ref, ZIO }
+import utils.network.Domain.{ConnectionError, Request, Response, Server, SuccessResponse, TimeoutError}
+import zio.{IO, Ref, ZIO}
 import zio.test.Assertion.equalTo
 import zio.test.environment.TestClock
-import zio.test.{ assert, suite, testM, DefaultRunnableSpec }
+import zio.test.{DefaultRunnableSpec, assert, suite, testM}
 import zio.duration._
 import zio.test.TestAspect._
 
@@ -120,7 +120,6 @@ object CircuitBreakerSpec extends DefaultRunnableSpec {
           (_: Request) =>
             (_: Server) => {
               ref.updateAndGet(x => x + 1).flatMap { x =>
-                println(s"called :${x}")
                 IO.fail(ConnectionError)
               }
             }
@@ -160,6 +159,37 @@ object CircuitBreakerSpec extends DefaultRunnableSpec {
         req4       <- cb(request)(server)
         totalCalls <- ref.get.map(n => n == 4)
         successResponse  = req4.isInstanceOf[SuccessResponse]
+        openStatePresent = req3.find(x => x.isLeft)
+      } yield assert(totalCalls)(equalTo(true)) && assert(successResponse)(equalTo(true)) && assert(
+        openStatePresent.isDefined
+      )(equalTo(true))
+    }@@ eventually
+      @@ timeout(2.seconds)
+    ,testM("Circuit switches from closed to open and make half open after time lapse and closes on Error other than Connection error response") {
+      val request = Request("data")
+      val server  = Server("host", 9999)
+      val call: Ref[Int] => Request => Server => ZIO[Any, Domain.HttpClientError, Response] =
+        (ref: Ref[Int]) => {
+          (_: Request) =>
+            (_: Server) => {
+              ref.updateAndGet(x => x + 1).flatMap { num =>
+                IO.fail(if (num >= 4) {
+                  TimeoutError
+                } else {
+                  ConnectionError
+                })
+              }
+            }
+        }
+
+      for {
+        ref        <- Ref.make[Int](0)
+        cb         <- CircuitBreaker.withCircuitBreaker(call(ref), maxFailures = 2)
+        req3       <- ZIO.collectAllPar((0 to 2).map(_ => cb(request)(server).flip))
+        _          <- TestClock.adjust(16.seconds)
+        req4       <- cb(request)(server).flip
+        totalCalls <- ref.get.map(n => n == 4)
+        successResponse  = req4.fold(_=> false, _ == TimeoutError)
         openStatePresent = req3.find(x => x.isLeft)
       } yield assert(totalCalls)(equalTo(true)) && assert(successResponse)(equalTo(true)) && assert(
         openStatePresent.isDefined
