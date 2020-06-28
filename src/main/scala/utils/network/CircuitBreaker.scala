@@ -35,6 +35,9 @@ object CircuitBreaker {
 
     def incrementFail(): CircuitState = this.copy(continuesFailedCount = this.continuesFailedCount + 1)
     def updateOpenState(currentInstant: Instant, maxFailCount: Int, remainOpen: Duration): CircuitState =
+      if(this.halfOpenRequestCount > 0){
+        this.copy(halfOpenRequestCount = this.halfOpenRequestCount+1)
+      }else
       this.status match {
         case Some(_) =>
           if (openStateEndTime.isDefined && currentInstant.isAfter(openStateEndTime.get)) {
@@ -66,15 +69,6 @@ object CircuitBreaker {
                 ref
                   .updateAndGet(_.updateOpenState(cdt.toInstant, maxFailures, remainOpened))
                   .flatMap(_ match {
-                    case state if state.status.isDefined || state.halfOpenRequestCount > 1 => ZIO.fail(Left(CircuitBreakerOpened))
-
-                    case state if state.status.isEmpty && state.halfOpenRequestCount == 0 =>
-                      call(r)(s).either.flatMap {
-                        case err @ Left(e) if e == ConnectionError => ref.update(_.incrementFail()).map(_ => err)
-                        case err @ Left(_)                         => ZIO.succeed(err)
-                        case response                              => ref.update(_.resetState()).map(_ => response)
-                      }.absolve.mapError(Right(_))
-
                     case state if state.halfOpenRequestCount == 1 =>
                       call(r)(s)
                         .mapError(Right(_))
@@ -87,6 +81,17 @@ object CircuitBreaker {
                           case response => ref.update(_.resetState()).map(_ => response)
                         }
                         .absolve
+                      // Is OPen state is present or HalfOpen Requests are greater than one
+                    case state if state.status.isDefined || state.halfOpenRequestCount > 1 => ZIO.fail(Left(CircuitBreakerOpened))
+
+                    case state if state.status.isEmpty && state.halfOpenRequestCount == 0 =>
+                      call(r)(s).either.flatMap {
+                        case err @ Left(e) if e == ConnectionError => ref.update(_.incrementFail()).map(_ => err)
+                        case err @ Left(_)                         => ZIO.succeed(err)
+                        case response                              => ref.update(_.resetState()).map(_ => response)
+                      }.absolve.mapError(Right(_))
+
+
                   })
               }
             }
