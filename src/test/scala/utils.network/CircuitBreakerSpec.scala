@@ -119,7 +119,7 @@ object CircuitBreakerSpec extends DefaultRunnableSpec {
         (ref: Ref[Int]) => {
           (_: Request) =>
             (_: Server) => {
-              ref.updateAndGet(x => x + 1).flatMap { x =>
+              ref.updateAndGet(x => x + 1).flatMap { _ =>
                 IO.fail(ConnectionError)
               }
             }
